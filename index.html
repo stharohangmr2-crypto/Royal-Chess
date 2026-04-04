@@ -2381,16 +2381,19 @@ function tryRankedConnect(myPeer,s,lobbyId,asHost){
   if(asHost){becomeRankedLobby(myPeer,s,lobbyId);return;}
   const c=myPeer.connect(lobbyId,{metadata:{name:s.name,elo:s.ranked.elo,tier:getTier(s.ranked.elo).name,avatar:s.equippedAvatar}});
   let opened=false;
+  // Attach handleOnlineData immediately so moves during the game are received
+  c.on('data',d=>{
+    if(d.type==='ranked_matched'){
+      onlineOppName=d.oppName;oppElo=d.oppElo||1200;
+      showRankedMMFound(d.oppName,d.oppAvatar||'♞',d.oppTier||'Pawn',oppElo);
+      setTimeout(()=>startRankedOnlineGame(),2800);
+    } else {
+      handleOnlineData(d);
+    }
+  });
   c.on('open',()=>{
     opened=true;onlineRole='guest';conn=c;
-    c.on('data',d=>{
-      if(d.type==='ranked_matched'){
-        onlineOppName=d.oppName;oppElo=d.oppElo||1200;
-        showRankedMMFound(d.oppName,d.oppAvatar||'♞',d.oppTier||'Pawn',oppElo);
-        conn.on('data',handleOnlineData);conn.on('close',handleDisconnect);
-        setTimeout(()=>startRankedOnlineGame(),2800);
-      }
-    });
+    c.on('close',handleDisconnect);
   });
   setTimeout(()=>{if(!opened&&mmSec<35)becomeRankedLobby(myPeer,s,lobbyId);},3500);
   c.on('error',()=>{if(mmSec<35)becomeRankedLobby(myPeer,s,lobbyId);});
@@ -2405,10 +2408,12 @@ function becomeRankedLobby(myPeer,s,lobbyId){
     onlineRole='host';onlineOppName=c.metadata?.name||'Opponent';
     oppElo=c.metadata?.elo||1200;conn=c;
     const oppTier=c.metadata?.tier||'Pawn';const oppAv=c.metadata?.avatar||'♞';
+    // Attach data listener before open fires
+    c.on('data',handleOnlineData);
+    c.on('close',handleDisconnect);
     c.on('open',()=>{
       c.send({type:'ranked_matched',oppName:s.name,oppElo:s.ranked.elo,oppTier:getTier(s.ranked.elo).name,oppAvatar:s.equippedAvatar});
       showRankedMMFound(onlineOppName,oppAv,oppTier,oppElo);
-      conn.on('data',handleOnlineData);conn.on('close',handleDisconnect);
       setTimeout(()=>startRankedOnlineGame(),2800);
     });
   });
@@ -2451,10 +2456,20 @@ function startRankedOnlineGame(){
   document.getElementById('name-bot').textContent=(imWhite?s.name:onlineOppName)+' · '+s.ranked.elo+' ELO';
   document.getElementById('av-top').className=imWhite?'pav obl':'pav owh';
   document.getElementById('av-bot').className=imWhite?'pav owh':'pav obl';
-  document.getElementById('hint-btn').style.display='none';
+  // Allow hints for admin, hide for normal players in ranked
+  const hintBtn=document.getElementById('hint-btn');
+  if(hintBtn)hintBtn.style.display=(isAdmin()||window._trialAdmin)?'flex':'none';
   document.getElementById('emote-btn').style.display='flex';
   document.getElementById('chat-btn').style.display='flex';
   resetChat();updateGameHintDisplay();showScreen('game-screen');renderBoard();updateUI();updateSurrenderBtn();
+  // Init clock for ranked (default 5+0)
+  const tc=selectedRankedTC||'5+0';
+  initClock(tc);
+  startClockInterval();
+  // Host tells guest what TC to use
+  if(onlineRole==='host'&&conn&&conn.open){
+    conn.send({type:'tc_info',tc});
+  }
   showToast(imWhite?'⚔️ Ranked · You play White':'⚔️ Ranked · You play Black','#7dc4f0');
 }
 
@@ -3883,41 +3898,42 @@ let _lobbyTC='5+0'; // time control chosen in lobby
 function setupConn(role,name,oppPieceSet){
   onlineRole=role;onlineOppName=name;
   onlineOppPieceSet=oppPieceSet||'classic';
+
+  // Attach data listener immediately (before open) so no messages are missed
   conn.on('data',d=>{
     if(d.type==='piece_sync'){
       onlineOppPieceSet=d.pieceSet||'classic';
       if(d.name)onlineOppName=d.name;
-      // Guest: update lobby with host name/info received
-      if(role==='guest')lobbyGuestUpdate(d);
+      if(d.avatar)onlineOppAvatar=d.avatar||'♟';
+      if(role==='guest'){
+        lobbyGuestUpdate(d);
+      } else {
+        // Host received guest's piece_sync — update guest slot live
+        lobbyGuestJoined(d.name||'Friend', d.avatar||'♟');
+      }
     }
     else if(d.type==='lobby_start'){
-      // Host says game is starting
-      _lobbyTC=d.tc||'5+0';
+      _lobbyTC=d.tc||selectedTC||'5+0';
       selectedTC=_lobbyTC;
       startOnlineGame();
     }
     else if(d.type==='lobby_tc'){
-      // Host changed time control
       _lobbyTC=d.tc;
       selectedTC=d.tc;
       lobbyUpdateTCLabel(d.tc);
     }
     else handleOnlineData(d);
   });
-  conn.on('close',()=>{
-    if(mode!=='online')handleDisconnect();
-    else handleDisconnect();
-  });
-  conn.on('error',handleDisconnect);
+  conn.on('close',()=>handleDisconnect());
+  conn.on('error',()=>handleDisconnect());
 
-  // Send our info
+  // Send our info — do it on open if not yet open, or immediately
   const s=getSave();
   const av=AVATARS.find(a=>a.id===s.equippedAvatar)?.e||'♟';
   const payload={type:'piece_sync',pieceSet:s.equippedPieces||'classic',name:s.name||'Friend',avatar:av};
-  const send=()=>conn.send(payload);
-  if(conn&&conn.open)send(); else conn.on('open',send);
+  if(conn.open) conn.send(payload); else conn.on('open',()=>conn.send(payload));
 
-  // Show the lobby instead of starting game immediately
+  // Show the lobby
   showLobby(role,name,oppPieceSet);
 }
 
@@ -4380,11 +4396,11 @@ function tryConnectLobby(myPeer,s,lobbyId,phase){
         onlineOppName=d.oppName;
         onlineOppPieceSet=d.oppPieceSet||'classic';
         oppBet=d.oppBet||lastBet;
-        // Each player wins double their OWN bet if they win
         showMMFound(d.oppName,d.oppAvatar||'♟',lastBet*2,oppBet*2);
-        conn.on('data',d2=>{if(d2.type==='piece_sync'){onlineOppPieceSet=d2.pieceSet||'classic';}else handleOnlineData(d2);});
         conn.on('close',handleDisconnect);
         setTimeout(()=>startOnlineGame(),2800);
+      } else {
+        handleOnlineData(d);
       }
     });
   });
@@ -4490,12 +4506,22 @@ function startOnlineGame(){
   document.getElementById('name-bot').textContent=(imWhite?myName:onlineOppName)+' · Bet: 💰'+lastBet+(oppBet&&oppBet!==lastBet?' vs 💰'+oppBet:'');
   document.getElementById('av-top').className=imWhite?'pav obl':'pav owh';
   document.getElementById('av-bot').className=imWhite?'pav owh':'pav obl';
-  document.getElementById('hint-btn').style.display='none';
+  // Allow hints for admin, hide for normal players in online
+  const hintBtn=document.getElementById('hint-btn');
+  if(hintBtn)hintBtn.style.display=(isAdmin()||window._trialAdmin)?'flex':'none';
   document.getElementById('emote-btn').style.display='flex';
   document.getElementById('chat-btn').style.display='flex';
   resetChat();
   updateGameHintDisplay();showScreen('game-screen');renderBoard();updateUI();
   updateSurrenderBtn();
+  // Init clock
+  const tc=selectedTC||'5+0';
+  initClock(tc);
+  if(clockEnabled)startClockInterval();
+  // Host tells guest TC
+  if(onlineRole==='host'&&conn&&conn.open){
+    conn.send({type:'tc_info',tc});
+  }
   showToast(imWhite?'You play White ♔':'You play Black ♚','var(--blue)');
 }
 function refreshOnlineScreen(){
@@ -4810,7 +4836,9 @@ function updateGameHintDisplay(){
 
 // HINT
 function useHint(){
-  if(over||!myTurn()||mode==='online')return;
+  if(over||!myTurn())return;
+  // Block hints in online for normal players; allow for admin
+  if(mode==='online'&&!isAdmin()&&!window._trialAdmin)return;
   const s=getSave();
   if(s.hints<=0){showToast('No hints left! Buy in Shop 🛒','var(--blue)');return;}
   updateSave(sv=>sv.hints--);updateGameHintDisplay();clearHints();
@@ -8452,19 +8480,6 @@ function handleOnlineData(data){
 
 // clockOnMove() is called directly inside doMove below
 
-// Patch startOnlineGame to init clock
-const _origStartOnlineGame=startOnlineGame;
-function startOnlineGame(){
-  _origStartOnlineGame();
-  const tc=(isRankedMode?selectedRankedTC:selectedTC)||'5+0';
-  initClock(tc);
-  startClockInterval();
-  // Host sends tc_info to guest
-  if(onlineRole==='host'&&conn&&conn.open){
-    conn.send({type:'tc_info',tc});
-  }
-}
-
 // ══════════════════════════════════════════════════════════════
 // REAL FRIEND SYSTEM (Firebase-backed)
 // ══════════════════════════════════════════════════════════════
@@ -9298,20 +9313,8 @@ function adminSearchPlayer(){
   res.innerHTML='<div style="font-size:.75rem;color:var(--txd);">Searching…</div>';
   initFirebase();
   if(!fbDb){res.innerHTML='<div style="color:var(--red);font-size:.75rem;">Firebase not connected</div>';return;}
-  // Look up uid from username index
-  fbDb.ref('usernames/'+name.toLowerCase()).once('value').then(snap=>{
-    if(!snap.exists()){
-      res.innerHTML='<div style="font-size:.75rem;color:var(--red);">No player found with username "'+escapeHtml(name)+'"</div>';
-      return;
-    }
-    const data=snap.val();
-    const uid=data.uid||null;
-    const displayName=data.name||name;
-    if(!uid){
-      res.innerHTML='<div style="font-size:.75rem;color:var(--red);">Username found but no UID linked.</div>';
-      return;
-    }
-    // Now load profile + ranked data in parallel
+
+  function showPlayerResult(uid, displayName){
     Promise.all([
       fbDb.ref('player_profiles/'+uid).once('value'),
       fbDb.ref('ranked_season_'+RANKED_SEASON+'/'+uid).once('value'),
@@ -9321,16 +9324,17 @@ function adminSearchPlayer(){
       const rank=rankSnap.exists()?rankSnap.val():{};
       const mute=muteSnap.exists()?muteSnap.val():null;
       const isMuted=mute&&(mute.permanent||(mute.mutedUntil&&mute.mutedUntil>Date.now()));
-      const elo=rank.elo||1200;
+      const elo=rank.elo||prof.elo||1200;
       const tier=getTier(elo);
       const wins=prof.totalWins||rank.seasonWins||0;
       const streak=prof.bestStreak||0;
+      const shownName=prof.name||displayName||name;
       res.innerHTML=`
         <div style="background:var(--sf2);border:1px solid #1e3d6e;padding:10px 12px;">
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
             <div style="font-size:1.6rem;">${prof.avatar||'♟'}</div>
             <div style="flex:1;">
-              <div style="font-family:'Playfair Display',serif;font-size:.9rem;color:var(--tx);">${escapeHtml(displayName)}</div>
+              <div style="font-family:'Playfair Display',serif;font-size:.9rem;color:var(--tx);">${escapeHtml(shownName)}</div>
               <div style="font-size:.68rem;color:var(--txd);">${tier.icon} ${tier.name} · ${elo} ELO</div>
             </div>
             ${isMuted?'<span style="font-size:.6rem;padding:2px 6px;border:1px solid var(--red);color:var(--red);">MUTED</span>':''}
@@ -9360,6 +9364,38 @@ function adminSearchPlayer(){
           </div>
         </div>`;
     }).catch(()=>{res.innerHTML='<div style="color:var(--red);font-size:.75rem;">Failed to load player data.</div>';});
+  }
+
+  // Step 1: Try exact username key lookup
+  fbDb.ref('usernames/'+name.toLowerCase()).once('value').then(snap=>{
+    if(snap.exists()){
+      const data=snap.val();
+      const uid=data.uid||null;
+      if(uid){showPlayerResult(uid, data.name||name);return;}
+    }
+    // Step 2: Scan player_profiles by name field (case-insensitive partial match)
+    fbDb.ref('player_profiles').orderByChild('name').startAt(name).endAt(name+'\uf8ff').limitToFirst(5).once('value').then(snap2=>{
+      if(snap2.exists()){
+        // Take first result
+        const firstKey=Object.keys(snap2.val())[0];
+        const firstVal=snap2.val()[firstKey];
+        showPlayerResult(firstKey, firstVal.name||name);
+      } else {
+        // Step 3: Full scan for partial match (up to 200 profiles)
+        fbDb.ref('player_profiles').limitToFirst(200).once('value').then(snap3=>{
+          if(!snap3.exists()){res.innerHTML='<div style="font-size:.75rem;color:var(--red);">No player found with username "'+escapeHtml(name)+'"</div>';return;}
+          const lname=name.toLowerCase();
+          let foundUid=null,foundVal=null;
+          snap3.forEach(child=>{
+            if(!foundUid&&(child.val().name||'').toLowerCase().includes(lname)){
+              foundUid=child.key;foundVal=child.val();
+            }
+          });
+          if(foundUid){showPlayerResult(foundUid, foundVal.name||name);}
+          else{res.innerHTML='<div style="font-size:.75rem;color:var(--red);">No player found matching "'+escapeHtml(name)+'"</div>';}
+        }).catch(()=>{res.innerHTML='<div style="color:var(--red);font-size:.75rem;">Search failed.</div>';});
+      }
+    }).catch(()=>{res.innerHTML='<div style="color:var(--red);font-size:.75rem;">Search failed.</div>';});
   }).catch(()=>{res.innerHTML='<div style="color:var(--red);font-size:.75rem;">Search failed. Check Firebase connection.</div>';});
 }
 function adminCopyUID(uid){
