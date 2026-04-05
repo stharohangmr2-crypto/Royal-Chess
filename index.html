@@ -337,6 +337,7 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 /* GAME */
 #game-screen{padding:0;align-items:stretch;}
 .gwrap{width:100%;max-width:480px;height:100vh;height:100dvh;display:flex;flex-direction:column;margin:0 auto;}
+@media(min-width:700px){#game-screen{align-items:stretch;}.gwrap{max-width:100%;flex-direction:row;flex-wrap:wrap;}.gtop{width:100%;order:0;flex-shrink:0;}div.pbar.top{width:100%;order:1;flex-shrink:0;}#clk-opp-bar{width:100%;order:2;flex-shrink:0;}.board-area{order:3;flex:1 1 100%;min-height:0;}#clk-me-bar{width:100%;order:4;flex-shrink:0;}.sbar{width:100%;order:5;flex-shrink:0;}div.pbar.bot{width:100%;order:6;flex-shrink:0;}}
 .gtop{display:flex;align-items:center;justify-content:space-between;padding:5px 11px;background:var(--sf);border-bottom:1px solid var(--brd);flex-shrink:0;}
 .gtl{display:flex;align-items:center;gap:7px;}
 .gbadge{font-size:.6rem;letter-spacing:.09em;color:var(--txd);text-transform:uppercase;background:var(--sf2);border:1px solid var(--brd);padding:2px 6px;}
@@ -449,7 +450,7 @@ body::before{content:'';position:fixed;inset:0;background:radial-gradient(ellips
 .tdot{width:7px;height:7px;border-radius:50%;background:var(--brd);flex-shrink:0;transition:all .28s;}
 .tdot.on{background:var(--gold);box-shadow:0 0 8px var(--gold);}
 .board-area{flex:1;display:flex;align-items:center;justify-content:center;padding:7px;overflow:hidden;position:relative;}
-.bframe{position:relative;width:min(calc(100vw - 14px),calc(100vh - 180px));aspect-ratio:1;border:2px solid var(--gdm);box-shadow:0 0 0 1px var(--brd),0 0 50px rgba(0,0,0,.9);}
+.bframe{position:relative;width:min(calc(100vw - 14px),calc(100vh - 180px));aspect-ratio:1;border:2px solid var(--gdm);box-shadow:0 0 0 1px var(--brd),0 0 50px rgba(0,0,0,.9);}@media(min-width:700px){.bframe{width:auto;height:min(calc(100vh - 260px),70vw);max-height:70vmin;}}
 #board{width:100%;height:100%;display:grid;grid-template-columns:repeat(8,1fr);grid-template-rows:repeat(8,1fr);}
 .sq{position:relative;display:flex;align-items:center;justify-content:center;cursor:pointer;}
 .sq.lt{background:var(--ls);}.sq.dk{background:var(--ds);}
@@ -3196,14 +3197,13 @@ function buildEmotesPanel(){
   const panel=document.getElementById('panel-emotes');
   const scontent=panel.closest('.scontent');
   const savedScroll=scontent?scontent.scrollTop:0;
-
-  // Reload limited emotes from Firebase first, then render
-  loadLimitedEmoteExpiry(()=>{
-    panel.innerHTML=''; // clear right before render — avoids scroll snap during async wait
+  const doRender=()=>{
+    panel.innerHTML='';
     _renderEmotePanel(s,panel);
-    // Restore scroll position so buying an emote doesn't jump to top
     if(scontent)requestAnimationFrame(()=>{ scontent.scrollTop=savedScroll; });
-  });
+  };
+  if(window._limitedEmotesLoaded){doRender();}
+  else{loadLimitedEmoteExpiry(()=>{window._limitedEmotesLoaded=true;doRender();});}
 }
 function _renderEmotePanel(s,panel){
   panel.innerHTML='';
@@ -6315,7 +6315,7 @@ initApp();checkInviteLink();
     <!-- View Tournament Registrations -->
     <div style="background:var(--sf);border:1.5px solid var(--gdm);padding:14px;">
       <div style="font-family:'Playfair Display',serif;font-size:.95rem;color:var(--gold);margin-bottom:8px;">📋 Tournament Registrations</div>
-      <button class="btn" onclick="adminLoadRegistrations()" style="margin:0 0 8px;padding:9px;">Load Registrations</button>
+      <div style="display:flex;gap:8px;margin-bottom:8px;"><button class="btn" onclick="adminLoadRegistrations()" style="flex:1;padding:9px;">Load List</button><button class="btn" onclick="adminClearRegistrations()" style="flex:1;padding:9px;border-color:var(--red);color:var(--red);">🗑️ Clear All</button></div>
       <div id="admin-reg-list" style="font-size:.78rem;color:var(--txd);max-height:200px;overflow-y:auto;"></div>
     </div>
 
@@ -7012,26 +7012,25 @@ function adminFilterPanels(q){
   const wrap=document.getElementById('admin-sections-wrap');
   const countEl=document.getElementById('admin-filter-count');
   if(!wrap)return;
-  // Get all direct child divs (the panels)
   const panels=Array.from(wrap.children).filter(el=>el.tagName==='DIV');
   q=q.toLowerCase().trim();
   if(!q){
-    panels.forEach(p=>{p.style.display='';});
+    panels.forEach(p=>{p.style.display='';p.style.order='';});
     if(countEl)countEl.style.display='none';
     return;
   }
   let visible=0;
   panels.forEach(panel=>{
-    // Search the full text content of each panel
     const text=panel.textContent.toLowerCase();
-    // Fuzzy: every character of q must appear in order in text
-    let ci=0,match=true;
-    for(let qi=0;qi<q.length;qi++){
-      ci=text.indexOf(q[qi],ci);
-      if(ci===-1){match=false;break;}
-      ci++;
-    }
+    // Get the panel title text (first heading-like element) for priority matching
+    const titleEl=panel.querySelector('[style*="font-family"],[style*="Playfair"]');
+    const title=(titleEl?titleEl.textContent:'').toLowerCase();
+    const titleMatch=title.includes(q);
+    const bodyMatch=text.includes(q);
+    const match=titleMatch||bodyMatch;
     panel.style.display=match?'':'none';
+    // Sort: title matches come first
+    panel.style.order=match?(titleMatch?'0':'1'):'2';
     if(match)visible++;
   });
   if(countEl){
@@ -7269,10 +7268,14 @@ function adminLoadTournamentStatus(){
 
 function adminToggleRegistration(){
   if(!isAdmin()){ showToast('Not authorized','var(--red)'); return; }
-  fbDb.ref('tournament_info/regOpen').once('value').then(snap=>{
-    const cur=snap.exists()?snap.val():true;
-    fbDb.ref('tournament_info/regOpen').set(!cur).then(()=>{
-      showToast(!cur?'Registration OPEN ✅':'Registration CLOSED 🔴');
+  fbDb.ref('tournament_info').once('value').then(snap=>{
+    const info=snap.exists()?snap.val():{};
+    const cur=info.regOpen!==false;
+    const opening=!cur;
+    const updates={'tournament_info/regOpen':opening};
+    if(opening) updates['tournament_info/status']='idle';
+    fbDb.ref().update(updates).then(()=>{
+      showToast(opening?'Registration OPEN ✅':'Registration CLOSED 🔴');
       adminLoadTournamentStatus();
     });
   });
@@ -7332,13 +7335,16 @@ function adminGiveCoins(){
   const amount = parseInt(document.getElementById('admin-coin-amount').value);
   if(!uid){ showToast('Enter player UID','var(--red)'); return; }
   if(!amount || amount < 1){ showToast('Enter valid amount','var(--red)'); return; }
-  fbDb.ref('admin_coin_gifts').push({
-    toUid: uid, amount, giftedAt: Date.now(), giftedBy: ADMIN_UID
-  }).then(() => {
-    showToast('Coins gift sent! 💰 Player will receive on next login.');
-    document.getElementById('admin-coin-uid').value = '';
-    document.getElementById('admin-coin-amount').value = '';
-  }).catch(() => showToast('Failed to send coins','var(--red)'));
+  fbDb.ref('player_profiles/'+uid).once('value').then(snap=>{
+    if(!snap.exists()){showToast('❌ Player UID not found','var(--red)');return;}
+    fbDb.ref('admin_coin_gifts').push({
+      toUid: uid, amount, giftedAt: Date.now(), giftedBy: ADMIN_UID
+    }).then(() => {
+      showToast('Coins gift sent! 💰 Player will receive on next login.');
+      document.getElementById('admin-coin-uid').value = '';
+      document.getElementById('admin-coin-amount').value = '';
+    }).catch(() => showToast('Failed to send coins','var(--red)'));
+  }).catch(()=>showToast('Failed to verify UID','var(--red)'));
 }
 
 function adminGiveDiamonds(){
@@ -7347,13 +7353,16 @@ function adminGiveDiamonds(){
   const amount = parseInt(document.getElementById('admin-diamond-amount').value);
   if(!uid){ showToast('Enter player UID','var(--red)'); return; }
   if(!amount || amount < 1){ showToast('Enter valid amount','var(--red)'); return; }
-  fbDb.ref('admin_diamond_gifts').push({
-    toUid: uid, amount, giftedAt: Date.now(), giftedBy: ADMIN_UID
-  }).then(() => {
-    showToast('Diamonds gift sent! 💎 Player will receive on next login.');
-    document.getElementById('admin-diamond-uid').value = '';
-    document.getElementById('admin-diamond-amount').value = '';
-  }).catch(() => showToast('Failed to send diamonds','var(--red)'));
+  fbDb.ref('player_profiles/'+uid).once('value').then(snap=>{
+    if(!snap.exists()){showToast('❌ Player UID not found','var(--red)');return;}
+    fbDb.ref('admin_diamond_gifts').push({
+      toUid: uid, amount, giftedAt: Date.now(), giftedBy: ADMIN_UID
+    }).then(() => {
+      showToast('Diamonds gift sent! 💎 Player will receive on next login.');
+      document.getElementById('admin-diamond-uid').value = '';
+      document.getElementById('admin-diamond-amount').value = '';
+    }).catch(() => showToast('Failed to send diamonds','var(--red)'));
+  }).catch(()=>showToast('Failed to verify UID','var(--red)'));
 }
 
 function adminLoadRegistrations(){
@@ -7374,6 +7383,17 @@ function adminLoadRegistrations(){
     });
     list.innerHTML = `<div style="color:var(--gold);margin-bottom:6px;">Total: ${count} players</div>` + html;
   }).catch(() => { list.innerHTML = 'Failed to load.'; });
+}
+
+function adminClearRegistrations(){
+  if(!isAdmin()){ showToast('Not authorized','var(--red)'); return; }
+  if(!confirm('Delete ALL tournament registrations? This cannot be undone!')) return;
+  const list = document.getElementById('admin-reg-list');
+  if(list) list.innerHTML = 'Clearing...';
+  fbDb.ref('tournament_registrations').remove().then(()=>{
+    showToast('All registrations cleared 🗑️','var(--gold)');
+    if(list) list.innerHTML = 'No registrations.';
+  }).catch(()=>showToast('Failed to clear','var(--red)'));
 }
 
 // Check for coin + diamond gifts from admin on login
@@ -7434,7 +7454,7 @@ window.bootIntoGame = function(){
   checkCoinGifts();
   if(getSave().isNew===false&&getSave().totalWins===0)processReferralOnSignup();
   loadTournamentDate();
-  loadLimitedEmoteExpiry();
+  loadLimitedEmoteExpiry(()=>{window._limitedEmotesLoaded=true;});
   loadAdminEmotes();
   loadAdminAvatars();
   loadAdminBoardThemes();
